@@ -319,15 +319,20 @@ class S3Client:
             raise S3HeadObjectError(bucket=self._config.bucket, key=key) from error
 
     async def list_keys(self, prefix: Prefix | None = None) -> list[Key]:
-        """List all object keys under an optional prefix.
+        """List all object keys under an optional logical parent prefix.
 
         Uses one S3 list request per page. Each request returns up to 1000 keys,
         so large prefixes may require multiple backend requests.
 
-        `None` and ``''`` both mean no prefix.
+        `None` and ``''`` both mean the bucket root. Non-empty prefixes are
+        treated as logical parent prefixes, so `tracks` and `tracks/` are
+        equivalent.
+
+        This does not use raw S3 string-prefix matching; sibling prefixes such
+        as `chunks/v10` are not returned for `chunks/v1`.
         """
         client = self._require_client()
-        prefix = prefix or None
+        prefix = self._normalize_prefix(prefix)
         keys: list[Key] = []
         token: str | None = None
 
@@ -354,7 +359,7 @@ class S3Client:
 
         return keys
 
-    async def list_subprefixes(self, prefix: Prefix | None = None) -> list[Prefix]:
+    async def list_prefixes(self, prefix: Prefix | None = None) -> list[Prefix]:
         """List immediate logical child prefixes under an optional parent prefix.
 
         `None` and ``''`` both refer to the bucket root. Non-empty prefixes are
@@ -363,19 +368,16 @@ class S3Client:
 
         This method returns only the immediate child prefixes (one level deep)
         using S3 delimiter-based grouping. Results correspond to logical
-        "folders", not arbitrary key prefixes.
+        "folders", not arbitrary key prefixes. Returned values use logical
+        prefix form, so trailing delimiters are not exposed to callers.
 
         Uses paginated S3 list requests, with up to 1000 entries per request.
         Large result sets may require multiple backend calls.
         """
         client = self._require_client()
-        prefix = prefix or None
+        prefix = self._normalize_prefix(prefix)
         prefixes: list[Prefix] = []
         token: str | None = None
-
-        effective_prefix = prefix
-        if effective_prefix and not effective_prefix.endswith(_DELIMITER):
-            effective_prefix = effective_prefix + _DELIMITER
 
         while True:
             kwargs: dict[str, object] = {
@@ -383,16 +385,16 @@ class S3Client:
                 'MaxKeys': _LIST_MAX_KEYS,
                 'Delimiter': _DELIMITER,
             }
-            if effective_prefix is not None:
-                kwargs['Prefix'] = effective_prefix
+            if prefix is not None:
+                kwargs['Prefix'] = prefix
             if token is not None:
                 kwargs['ContinuationToken'] = token
 
             try:
                 response = await client.list_objects_v2(**kwargs)
             except Exception as error:
-                raise S3ListObjectsError(bucket=self._config.bucket, prefix=effective_prefix) from error
-            prefixes.extend(item['Prefix'] for item in response.get('CommonPrefixes', []))
+                raise S3ListObjectsError(bucket=self._config.bucket, prefix=prefix) from error
+            prefixes.extend(item['Prefix'].removesuffix(_DELIMITER) for item in response.get('CommonPrefixes', []))
 
             if not response.get('IsTruncated'):
                 break
@@ -443,6 +445,12 @@ class S3Client:
         one request per 1000 keys, and deletion uses one delete request per
         batch of up to 1000 keys.
 
+        Prefixes are treated as logical parent prefixes, so `tracks` and
+        `tracks/` are equivalent. This does not use raw S3 string-prefix
+        matching. This deletes objects under the logical prefix only. It does
+        not delete an exact object named `foo` or sibling string-prefix matches
+        such as `foo.txt`.
+
         Args:
             prefix: Key prefix to delete under. Must be non-empty unless allow_root=True.
             allow_root: Explicit opt-in to allow deleting the entire bucket.
@@ -473,6 +481,10 @@ class S3Client:
         A successful copy may temporarily result in both objects existing.
         Delete failure after copy leaves duplicate data at both keys.
 
+        When `overwrite` is False, this implementation checks whether the
+        target key exists before copying. That check is not atomic against
+        concurrent writers.
+
         Limitations:
             - This implementation uses a single `copy_object` call and therefore
               only supports objects up to 5 GiB (S3 single-copy limit).
@@ -480,8 +492,9 @@ class S3Client:
 
         Raises:
             ValueError: If `source_key` and `target_key` are identical, or if
-                `target_key` already exists and `overwrite` is False, or if the
-                source object exceeds the S3 single-copy size limit.
+                `target_key` already exists when the best-effort `overwrite is
+                False` pre-check runs, or if the source object exceeds the S3
+                single-copy size limit.
             S3ObjectNotFoundError: If `source_key` does not exist.
             S3MoveObjectError: If the backend copy fails, or if deleting the
                 source fails after a successful copy.
@@ -546,6 +559,19 @@ class S3Client:
         delimiters do not produce empty elements.
         """
         return [segment for segment in key.split(_DELIMITER) if segment]
+
+    def _normalize_prefix(self, prefix: Prefix | None) -> Prefix | None:
+        """Normalize a logical parent prefix for list operations.
+
+        `None` and ``''`` both refer to the bucket root. Non-empty prefixes are
+        treated as logical parent prefixes, so `tracks` and `tracks/` are
+        equivalent.
+        """
+        if not prefix:
+            return None
+        if prefix.endswith(_DELIMITER):
+            return prefix
+        return prefix + _DELIMITER
 
     async def _delete_batch(self, keys: list[Key]) -> int:
         """Delete one exact-key batch and return backend-reported deleted count."""

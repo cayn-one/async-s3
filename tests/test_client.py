@@ -245,9 +245,11 @@ async def test_list_keys_collects_all_pages(monkeypatch: pytest.MonkeyPatch) -> 
     class _Client:
         def __init__(self) -> None:
             self.calls = 0
+            self.prefixes: list[str | None] = []
 
-        async def list_objects_v2(self, **_kwargs):
+        async def list_objects_v2(self, **kwargs):
             self.calls += 1
+            self.prefixes.append(kwargs.get('Prefix'))
             if self.calls == 1:
                 return {
                     'Contents': [{'Key': 'a/1'}, {'Key': 'a/2'}],
@@ -264,10 +266,11 @@ async def test_list_keys_collects_all_pages(monkeypatch: pytest.MonkeyPatch) -> 
 
     storage = S3Client(_config())
     await storage.open()
-    keys = await storage.list_keys('a/')
+    keys = await storage.list_keys('a')
     await storage.close()
 
     assert keys == ['a/1', 'a/2', 'a/3']
+    assert client.prefixes == ['a/', 'a/']
 
 
 @pytest.mark.asyncio
@@ -292,7 +295,30 @@ async def test_list_keys_wraps_backend_failure(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_list_subprefixes_normalizes_parent_prefix(
+async def test_list_keys_normalizes_parent_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def list_objects_v2(self, **kwargs):
+            assert kwargs['Bucket'] == 'bucket'
+            assert kwargs['Prefix'] == 'a/'
+            return {
+                'Contents': [{'Key': 'a/1'}, {'Key': 'a/2'}],
+                'IsTruncated': False,
+            }
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+    keys = await storage.list_keys('a')
+    await storage.close()
+
+    assert keys == ['a/1', 'a/2']
+
+
+@pytest.mark.asyncio
+async def test_list_prefixes_normalizes_parent_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client:
@@ -309,10 +335,10 @@ async def test_list_subprefixes_normalizes_parent_prefix(
 
     storage = S3Client(_config())
     await storage.open()
-    prefixes = await storage.list_subprefixes('a')
+    prefixes = await storage.list_prefixes('a')
     await storage.close()
 
-    assert prefixes == ['a/1/', 'a/2/']
+    assert prefixes == ['a/1', 'a/2']
 
 
 @pytest.mark.asyncio
@@ -338,7 +364,7 @@ async def test_list_keys_empty_prefix_matches_no_prefix(
 
 
 @pytest.mark.asyncio
-async def test_list_subprefixes_empty_prefix_matches_no_prefix(
+async def test_list_prefixes_empty_prefix_matches_no_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client:
@@ -354,14 +380,14 @@ async def test_list_subprefixes_empty_prefix_matches_no_prefix(
 
     storage = S3Client(_config())
     await storage.open()
-    prefixes = await storage.list_subprefixes('')
+    prefixes = await storage.list_prefixes('')
     await storage.close()
 
-    assert prefixes == ['a/', 'b/']
+    assert prefixes == ['a', 'b']
 
 
 @pytest.mark.asyncio
-async def test_list_subprefixes_wraps_backend_failure(
+async def test_list_prefixes_wraps_backend_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client:
@@ -374,13 +400,136 @@ async def test_list_subprefixes_wraps_backend_failure(
     await storage.open()
 
     with pytest.raises(S3ListObjectsError) as exc:
-        await storage.list_subprefixes('a')
+        await storage.list_prefixes('a')
 
     await storage.close()
     assert exc.value.bucket == 'bucket'
     assert exc.value.prefix == 'a/'
     assert str(exc.value) == 'S3 list failed for prefix a/ in bucket bucket'
     assert isinstance(exc.value.__cause__, ClientError)
+
+
+@pytest.mark.asyncio
+async def test_list_keys_tracks_and_tracks_slash_are_equivalent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.prefixes: list[str | None] = []
+
+        async def list_objects_v2(self, **kwargs):
+            self.prefixes.append(kwargs.get('Prefix'))
+            return {
+                'Contents': [{'Key': 'tracks/one.mp3'}],
+                'IsTruncated': False,
+            }
+
+    client = _Client()
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(client))
+
+    storage = S3Client(_config())
+    await storage.open()
+    plain = await storage.list_keys('tracks')
+    slashed = await storage.list_keys('tracks/')
+    await storage.close()
+
+    assert plain == slashed == ['tracks/one.mp3']
+    assert client.prefixes == ['tracks/', 'tracks/']
+
+
+@pytest.mark.asyncio
+async def test_list_prefixes_tracks_and_tracks_slash_are_equivalent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.prefixes: list[str | None] = []
+
+        async def list_objects_v2(self, **kwargs):
+            self.prefixes.append(kwargs.get('Prefix'))
+            return {
+                'CommonPrefixes': [{'Prefix': 'tracks/live/'}, {'Prefix': 'tracks/studio/'}],
+                'IsTruncated': False,
+            }
+
+    client = _Client()
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(client))
+
+    storage = S3Client(_config())
+    await storage.open()
+    plain = await storage.list_prefixes('tracks')
+    slashed = await storage.list_prefixes('tracks/')
+    await storage.close()
+
+    assert plain == slashed == ['tracks/live', 'tracks/studio']
+    assert client.prefixes == ['tracks/', 'tracks/']
+
+
+@pytest.mark.asyncio
+async def test_list_prefixes_matches_join_canonical_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def list_objects_v2(self, **kwargs):
+            assert kwargs['Prefix'] == 'projects/'
+            return {
+                'CommonPrefixes': [{'Prefix': 'projects/alpha/'}, {'Prefix': 'projects/beta/'}],
+                'IsTruncated': False,
+            }
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+    prefixes = await storage.list_prefixes('projects')
+    await storage.close()
+
+    assert S3Client.join('projects', 'alpha') in prefixes
+    assert prefixes == ['projects/alpha', 'projects/beta']
+
+
+@pytest.mark.asyncio
+async def test_list_prefixes_removes_only_one_trailing_delimiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def list_objects_v2(self, **kwargs):
+            assert kwargs['Prefix'] == 'a/'
+            return {
+                'CommonPrefixes': [{'Prefix': 'a//'}],
+                'IsTruncated': False,
+            }
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+    prefixes = await storage.list_prefixes('a')
+    await storage.close()
+
+    assert prefixes == ['a/']
+
+
+@pytest.mark.asyncio
+async def test_list_keys_does_not_match_sibling_string_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def list_objects_v2(self, **kwargs):
+            assert kwargs['Prefix'] == 'chunks/v1/'
+            return {
+                'Contents': [{'Key': 'chunks/v1/0001'}, {'Key': 'chunks/v1/0002'}],
+                'IsTruncated': False,
+            }
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+    keys = await storage.list_keys('chunks/v1')
+    await storage.close()
+
+    assert keys == ['chunks/v1/0001', 'chunks/v1/0002']
 
 
 @pytest.mark.asyncio
@@ -391,9 +540,11 @@ async def test_delete_prefix_batches_and_counts_deleted_objects(
         def __init__(self) -> None:
             self.delete_batches: list[list[str]] = []
             self.list_calls = 0
+            self.prefixes: list[str | None] = []
 
-        async def list_objects_v2(self, **_kwargs):
+        async def list_objects_v2(self, **kwargs):
             self.list_calls += 1
+            self.prefixes.append(kwargs.get('Prefix'))
             if self.list_calls == 1:
                 contents = [{'Key': f'p/{i}'} for i in range(1000)]
                 return {
@@ -417,13 +568,14 @@ async def test_delete_prefix_batches_and_counts_deleted_objects(
 
     storage = S3Client(_config())
     await storage.open()
-    deleted = await storage.delete_prefix('p/')
+    deleted = await storage.delete_prefix('p')
     await storage.close()
 
     assert deleted == 1003
     assert len(client.delete_batches) == 2
     assert len(client.delete_batches[0]) == 1000
     assert len(client.delete_batches[1]) == 3
+    assert client.prefixes == ['p/', 'p/']
 
 
 @pytest.mark.asyncio

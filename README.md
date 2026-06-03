@@ -143,16 +143,18 @@ async with S3Client(config) as s3:
         print(f"not found: {e.key}")
 ```
 
-### List keys and subprefixes
+### List keys and prefixes
 
 ```python
 async with S3Client(config) as s3:
-    # All keys under a prefix — pagination is handled automatically
-    keys = await s3.list_keys("uploads/")
+    # All keys under a logical parent prefix — pagination is handled automatically
+    # "uploads" and "uploads/" are equivalent
+    keys = await s3.list_keys("uploads")
     print(keys)  # ["uploads/a.txt", "uploads/b.txt", ...]
 
     # Immediate logical "subdirectories" one level deep
-    prefixes = await s3.list_subprefixes("projects/")
+    # "projects" and "projects/" are equivalent
+    prefixes = await s3.list_prefixes("projects")
     print(prefixes)  # ["projects/alpha/", "projects/beta/"]
 
     # Both accept None or "" to mean the bucket root
@@ -182,12 +184,14 @@ async with S3Client(config) as s3:
 
 Move is a copy + delete and is **not atomic**. Supports objects up to 5 GiB (S3 single-copy limit). If the delete step fails after a successful copy, `S3MoveObjectError` is raised with `.stage == "delete_source"`.
 
+When `overwrite=False`, the target existence check is best-effort and is not atomic against concurrent writers.
+
 ```python
 async with S3Client(config) as s3:
     await s3.move(
         source_key="uploads/video.mp4",
         target_key="archive/video.mp4",
-        overwrite=False,  # raises ValueError if target already exists
+        overwrite=False,  # best-effort pre-check; not atomic against concurrent writers
     )
 ```
 
@@ -310,8 +314,8 @@ except S3OperationError as e:
 | `get_file(key, path, *, overwrite)` | `None` | Download object to a local file (atomic) |
 | `get_stream(key, target)` | `int` | Stream object into a writable `BinaryIO`, returns bytes written |
 | `exists(key)` | `bool` | Check whether an object exists |
-| `list_keys(prefix)` | `list[Key]` | List all keys under a prefix, paginated |
-| `list_subprefixes(prefix)` | `list[Prefix]` | List immediate logical child prefixes (one level deep) |
+| `list_keys(prefix)` | `list[Key]` | List all keys under a logical parent prefix, paginated |
+| `list_prefixes(prefix)` | `list[Prefix]` | List immediate logical child prefixes (one level deep) |
 | `delete_key(key)` | `None` | Delete a single object |
 | `delete_keys(keys)` | `int` | Delete a set of exact keys, auto-batched; returns deleted count |
 | `delete_prefix(prefix, *, allow_root)` | `int` | Delete all objects under a prefix; returns deleted count |
