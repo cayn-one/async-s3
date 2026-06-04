@@ -63,9 +63,9 @@ class S3DeleteObjectError(S3OperationError):
 class S3ListObjectsError(S3OperationError):
     """Raised when an S3 list operation fails."""
 
-    def __init__(self, *, bucket: str, prefix: Prefix | None) -> None:
+    def __init__(self, *, bucket: str, prefix: Prefix) -> None:
         self.prefix = prefix
-        super().__init__(f'S3 list failed for prefix {prefix} in bucket {bucket}', bucket=bucket)
+        super().__init__(f'S3 list failed for prefix {prefix!r} in bucket {bucket}', bucket=bucket)
 
 
 class S3BatchDeleteError(S3OperationError):
@@ -318,15 +318,14 @@ class S3Client:
                 return False
             raise S3HeadObjectError(bucket=self._config.bucket, key=key) from error
 
-    async def list_keys(self, prefix: Prefix | None = None) -> list[Key]:
-        """List all object keys under an optional logical parent prefix.
+    async def list_keys(self, prefix: Prefix = '') -> list[Key]:
+        """List all object keys under a logical parent prefix.
 
         Uses one S3 list request per page. Each request returns up to 1000 keys,
         so large prefixes may require multiple backend requests.
 
-        `None` and ``''`` both mean the bucket root. Non-empty prefixes are
-        treated as logical parent prefixes, so `tracks` and `tracks/` are
-        equivalent.
+        ``''`` means the bucket root. Non-empty prefixes are treated as logical
+        parent prefixes, so `tracks` and `tracks/` are equivalent.
 
         This does not use raw S3 string-prefix matching; sibling prefixes such
         as `chunks/v10` are not returned for `chunks/v1`.
@@ -341,7 +340,7 @@ class S3Client:
                 'Bucket': self._config.bucket,
                 'MaxKeys': _LIST_MAX_KEYS,
             }
-            if prefix is not None:
+            if prefix:
                 kwargs['Prefix'] = prefix
             if token is not None:
                 kwargs['ContinuationToken'] = token
@@ -359,12 +358,11 @@ class S3Client:
 
         return keys
 
-    async def list_prefixes(self, prefix: Prefix | None = None) -> list[Prefix]:
-        """List immediate logical child prefixes under an optional parent prefix.
+    async def list_prefixes(self, prefix: Prefix = '') -> list[Prefix]:
+        """List immediate logical child prefixes under a parent prefix.
 
-        `None` and ``''`` both refer to the bucket root. Non-empty prefixes are
-        treated as logical parent prefixes, so `tracks` and `tracks/` are
-        equivalent.
+        ``''`` refers to the bucket root. Non-empty prefixes are treated as
+        logical parent prefixes, so `tracks` and `tracks/` are equivalent.
 
         This method returns only the immediate child prefixes (one level deep)
         using S3 delimiter-based grouping. Results correspond to logical
@@ -385,7 +383,7 @@ class S3Client:
                 'MaxKeys': _LIST_MAX_KEYS,
                 'Delimiter': _DELIMITER,
             }
-            if prefix is not None:
+            if prefix:
                 kwargs['Prefix'] = prefix
             if token is not None:
                 kwargs['ContinuationToken'] = token
@@ -452,17 +450,19 @@ class S3Client:
         such as `foo.txt`.
 
         Args:
-            prefix: Key prefix to delete under. Must be non-empty unless allow_root=True.
+            prefix: Key prefix to delete under. Use ``''`` for the bucket root.
             allow_root: Explicit opt-in to allow deleting the entire bucket.
 
         Raises:
-            ValueError: If prefix is empty and allow_root is False.
+            TypeError: If `prefix` is not a string.
+            ValueError: If `prefix == ''` and allow_root is False.
             S3ListObjectsError: If listing objects under the prefix fails.
             S3BatchDeleteError: If a delete request fails or reports delete errors.
         """
-        if not prefix and not allow_root:
+        prefix = self._normalize_prefix(prefix)
+        if prefix == '' and not allow_root:
             raise ValueError('Refusing to delete entire bucket without allow_root=True')
-        key_list = await self.list_keys(prefix or None)
+        key_list = await self.list_keys(prefix)
         return await self.delete_keys(key_list)
 
     async def move(
@@ -560,15 +560,19 @@ class S3Client:
         """
         return [segment for segment in key.split(_DELIMITER) if segment]
 
-    def _normalize_prefix(self, prefix: Prefix | None) -> Prefix | None:
+    def _normalize_prefix(self, prefix: Prefix) -> Prefix:
         """Normalize a logical parent prefix for list operations.
 
-        `None` and ``''`` both refer to the bucket root. Non-empty prefixes are
-        treated as logical parent prefixes, so `tracks` and `tracks/` are
-        equivalent.
+        ``''`` refers to the bucket root. Non-empty prefixes are treated as
+        logical parent prefixes, so `tracks` and `tracks/` are equivalent.
+
+        Raises:
+            TypeError: If `prefix` is not a string.
         """
-        if not prefix:
-            return None
+        if not isinstance(prefix, str):
+            raise TypeError(f'prefix must be str, got {type(prefix).__name__}')
+        if prefix == '':
+            return ''
         if prefix.endswith(_DELIMITER):
             return prefix
         return prefix + _DELIMITER

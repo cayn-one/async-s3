@@ -290,7 +290,7 @@ async def test_list_keys_wraps_backend_failure(monkeypatch: pytest.MonkeyPatch) 
     await storage.close()
     assert exc.value.bucket == 'bucket'
     assert exc.value.prefix == 'a/'
-    assert str(exc.value) == 'S3 list failed for prefix a/ in bucket bucket'
+    assert str(exc.value) == "S3 list failed for prefix 'a/' in bucket bucket"
     assert isinstance(exc.value.__cause__, RuntimeError)
 
 
@@ -405,8 +405,44 @@ async def test_list_prefixes_wraps_backend_failure(
     await storage.close()
     assert exc.value.bucket == 'bucket'
     assert exc.value.prefix == 'a/'
-    assert str(exc.value) == 'S3 list failed for prefix a/ in bucket bucket'
+    assert str(exc.value) == "S3 list failed for prefix 'a/' in bucket bucket"
     assert isinstance(exc.value.__cause__, ClientError)
+
+
+@pytest.mark.asyncio
+async def test_list_keys_rejects_none_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def list_objects_v2(self, **_kwargs):
+            pytest.fail('list_objects_v2 should not be called for invalid prefix input')
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+
+    with pytest.raises(TypeError) as exc:
+        await storage.list_keys(None)  # type: ignore[arg-type]
+
+    await storage.close()
+    assert str(exc.value) == 'prefix must be str, got NoneType'
+
+
+@pytest.mark.asyncio
+async def test_list_prefixes_rejects_non_string_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def list_objects_v2(self, **_kwargs):
+            pytest.fail('list_objects_v2 should not be called for invalid prefix input')
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+
+    with pytest.raises(TypeError) as exc:
+        await storage.list_prefixes(0)  # type: ignore[arg-type]
+
+    await storage.close()
+    assert str(exc.value) == 'prefix must be str, got int'
 
 
 @pytest.mark.asyncio
@@ -617,6 +653,60 @@ async def test_delete_prefix_deletes_all_keys_when_listing_shifts_after_deletes(
     assert len(client.delete_batches) == 2
     assert len(client.delete_batches[0]) == 1000
     assert len(client.delete_batches[1]) == 3
+
+
+@pytest.mark.asyncio
+async def test_delete_prefix_rejects_none_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def list_objects_v2(self, **_kwargs):
+            pytest.fail('list_objects_v2 should not be called for invalid prefix input')
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+
+    with pytest.raises(TypeError) as exc:
+        await storage.delete_prefix(None)  # type: ignore[arg-type]
+
+    await storage.close()
+    assert str(exc.value) == 'prefix must be str, got NoneType'
+
+
+@pytest.mark.asyncio
+async def test_delete_prefix_rejects_zero_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def list_objects_v2(self, **_kwargs):
+            pytest.fail('list_objects_v2 should not be called for invalid prefix input')
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+
+    with pytest.raises(TypeError) as exc:
+        await storage.delete_prefix(0)  # type: ignore[arg-type]
+
+    await storage.close()
+    assert str(exc.value) == 'prefix must be str, got int'
+
+
+@pytest.mark.asyncio
+async def test_delete_prefix_rejects_false_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Client:
+        async def list_objects_v2(self, **_kwargs):
+            pytest.fail('list_objects_v2 should not be called for invalid prefix input')
+
+    monkeypatch.setattr(s3_module, 'get_session', lambda: _FakeSession(_Client()))
+
+    storage = S3Client(_config())
+    await storage.open()
+
+    with pytest.raises(TypeError) as exc:
+        await storage.delete_prefix(False)  # type: ignore[arg-type]
+
+    await storage.close()
+    assert str(exc.value) == 'prefix must be str, got bool'
 
 
 @pytest.mark.asyncio
@@ -1095,7 +1185,7 @@ async def test_delete_prefix_wraps_delete_request_failure_as_batch_delete_error(
 
 
 @pytest.mark.asyncio
-async def test_list_keys_wraps_backend_failure_without_prefix_as_none(
+async def test_list_keys_wraps_backend_failure_without_prefix_as_empty_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client:
@@ -1111,8 +1201,8 @@ async def test_list_keys_wraps_backend_failure_without_prefix_as_none(
         await storage.list_keys()
 
     await storage.close()
-    assert exc.value.prefix is None
-    assert str(exc.value) == 'S3 list failed for prefix None in bucket bucket'
+    assert exc.value.prefix == ''
+    assert str(exc.value) == "S3 list failed for prefix '' in bucket bucket"
 
 
 @pytest.mark.asyncio

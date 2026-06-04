@@ -155,10 +155,11 @@ async with S3Client(config) as s3:
     # Immediate logical "subdirectories" one level deep
     # "projects" and "projects/" are equivalent
     prefixes = await s3.list_prefixes("projects")
-    print(prefixes)  # ["projects/alpha/", "projects/beta/"]
+    print(prefixes)  # ["projects/alpha", "projects/beta"]
 
-    # Both accept None or "" to mean the bucket root
+    # Omit the argument or pass "" for the bucket root
     all_keys = await s3.list_keys()
+    root_prefixes = await s3.list_prefixes("")
 ```
 
 ### Delete objects
